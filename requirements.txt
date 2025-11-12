@@ -1,0 +1,10 @@
+# VERSION: 0.1.1
+# It is recommended to install these dependencies in a Python virtual environment
+# to avoid conflicts with system packages.
+# python -m venv venv
+# source venv/bin/activate
+# pip install -r requirements.txt
+PyYAML==6.0.1
+docker==7.0.0
+pytest==8.2.0
+pytest-mock==3.14.0
