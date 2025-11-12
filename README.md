@@ -1,5 +1,5 @@
 
-# Llama-Swap-Sync Script
+# Llama-Swap-Sync
 
 ![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)
 
@@ -38,8 +38,8 @@ You can customize your model entries with confidence, knowing this tool will not
 
 1.  **Clone the repository or download the files:**
     ```bash
-    git clone <repository_url>
-    cd <repository_directory>
+    git clone [<repository_url>](https://github.com/pkeffect/llama-swap-sync)
+    cd llama-swap-sync
     ```
 
 2.  **Create and activate a Python virtual environment (recommended):**
@@ -113,4 +113,3 @@ The project includes a test suite to verify the core logic.
 ## License
 
 This project is licensed under the MIT License.
-```
