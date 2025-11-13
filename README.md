@@ -79,7 +79,7 @@ The script is run from the command line. By default, it looks for `./models` and
 Specify custom paths for the config file and models directory, prune stale entries, and restart a specific container.
 
 ```bash
-python sync.py \
+python llama-swap-sync.py \
   --config /opt/llama-swap/config.yaml \
   --models-dir /mnt/models \
   --container my-llama-swap-container \
