@@ -1,9 +1,10 @@
-# VERSION: 0.1.1
+# VERSION: 0.2.0
 import argparse
 import datetime
 import glob
 import logging
 import os
+import re
 import shutil
 import sys
 from typing import Dict, Any, Optional, Set, Tuple
@@ -21,7 +22,7 @@ MAX_BACKUPS = 3
 # --- PyYAML Customization for pretty multiline strings ---
 class LiteralString(str): pass
 
-def literal_representer(dumper, data):
+def literal_representer(dumper, data) -> yaml.ScalarNode:
     """Instructs PyYAML to dump a string as a literal block scalar (using '|')."""
     return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
 
@@ -42,6 +43,19 @@ CMD_TEMPLATE = (
     "  --port ${{PORT}}\n"
     "  --host 0.0.0.0"
 )
+
+def validate_filename(filename: str) -> bool:
+    """
+    Validate that filename is safe and follows expected pattern.
+    Prevents path traversal and ensures only valid GGUF filenames.
+    """
+    if not filename:
+        return False
+    # Check for path traversal attempts
+    if '..' in filename or '/' in filename or '\\' in filename:
+        return False
+    # Ensure filename matches expected pattern: alphanumeric, dash, underscore, dot, .gguf extension
+    return re.match(r'^[\w\-\.]+\.gguf$', filename) is not None
 
 def create_model_entry(filename: str) -> Dict[str, Any]:
     """Creates a comprehensive, scaffolded dictionary for a model entry."""
@@ -67,6 +81,7 @@ def manage_backups(config_path: str, dry_run: bool) -> None:
     backup_pattern = f"{config_path}.bak.*"
     existing_backups = sorted(glob.glob(backup_pattern))
 
+    # Keep MAX_BACKUPS total - delete oldest if we're at the limit
     while len(existing_backups) >= MAX_BACKUPS:
         oldest_backup = existing_backups.pop(0)
         if dry_run:
@@ -93,10 +108,22 @@ def load_config(config_path: str) -> Dict[str, Any]:
     """Loads and parses the YAML config file, handling errors gracefully."""
     try:
         with open(config_path, 'r') as f:
-            return yaml.safe_load(f) or {}
+            data = yaml.safe_load(f)
+            # Handle empty or invalid config files
+            if data is None or not isinstance(data, dict):
+                logging.warning("Config file is empty or invalid. Starting with default structure.")
+                return {'models': {}}
+            # Ensure models key exists
+            if 'models' not in data:
+                data['models'] = {}
+            # Validate that models is a dict
+            if not isinstance(data['models'], dict):
+                logging.error("'models' key in config is not a dictionary. Resetting to empty dict.")
+                data['models'] = {}
+            return data
     except FileNotFoundError:
         logging.warning("Config file not found at '%s'. A new one will be created.", config_path)
-        return {}
+        return {'models': {}}
     except yaml.YAMLError as e:
         logging.critical("Failed to parse config file '%s'. It may be corrupted.", config_path)
         logging.critical("YAML parsing error: %s", e)
@@ -116,6 +143,10 @@ def audit_config_entries(config_models: Dict[str, Any]) -> int:
     """
     logging.info("--- Auditing Existing Config Entries for Completeness ---")
     models_updated = 0
+    
+    # Create template keys set once for efficiency
+    template_keys = set(create_model_entry("dummy.gguf").keys())
+    
     for model_key in list(config_models.keys()):
         existing_entry = config_models[model_key]
         
@@ -125,17 +156,17 @@ def audit_config_entries(config_models: Dict[str, Any]) -> int:
             models_updated += 1
             continue
 
-        ideal_template = create_model_entry(f"{model_key}.gguf")
         entry_was_modified = False
         
-        # Check for and add any missing keys from the template.
-        for key, default_value in ideal_template.items():
-            if key not in existing_entry:
-                existing_entry[key] = default_value
-                entry_was_modified = True
-        
-        if entry_was_modified:
-            logging.info("UPDATING: Entry '%s' is missing one or more keys. Defaults have been added.", model_key)
+        # Check for missing keys
+        missing_keys = template_keys - existing_entry.keys()
+        if missing_keys:
+            # Generate full template to get default values for missing keys
+            ideal_template = create_model_entry(f"{model_key}.gguf")
+            for key in missing_keys:
+                existing_entry[key] = ideal_template[key]
+            entry_was_modified = True
+            logging.info("UPDATING: Entry '%s' was missing keys: %s", model_key, sorted(missing_keys))
             models_updated += 1
 
     if models_updated == 0:
@@ -146,8 +177,16 @@ def find_models_on_disk(models_dir: str) -> Set[str]:
     """Scans the models directory for .gguf files and returns a set of model keys."""
     logging.info("--- Syncing with Models Directory ---")
     try:
-        filenames = [f for f in os.listdir(models_dir) if f.endswith('.gguf')]
-        return {f.replace('.gguf', '') for f in filenames}
+        all_files = [f for f in os.listdir(models_dir) if f.endswith('.gguf')]
+        valid_files = [f for f in all_files if validate_filename(f)]
+        
+        invalid_count = len(all_files) - len(valid_files)
+        if invalid_count > 0:
+            invalid_files = set(all_files) - set(valid_files)
+            logging.warning("Ignored %d file(s) with invalid/unsafe filenames: %s", 
+                          invalid_count, ', '.join(sorted(invalid_files)))
+        
+        return {f.replace('.gguf', '') for f in valid_files}
     except FileNotFoundError:
         logging.error("Models directory '%s' not found. Cannot add new models.", models_dir)
         return set()
@@ -180,33 +219,46 @@ def sync_disk_to_config(config_models: Dict[str, Any], disk_keys: Set[str], prun
     
     return models_added, models_removed
 
+def prepare_config_for_save(config_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Create a deep copy of config with cmd fields wrapped in LiteralString for YAML output.
+    This prevents mutation of the original config_data dictionary.
+    """
+    import copy
+    save_data = copy.deepcopy(config_data)
+    
+    if 'models' in save_data and isinstance(save_data['models'], dict):
+        for model_entry in save_data['models'].values():
+            if isinstance(model_entry, dict) and 'cmd' in model_entry:
+                # Ensure cmd value is a string before wrapping
+                if not isinstance(model_entry['cmd'], str):
+                    model_entry['cmd'] = str(model_entry['cmd'])
+                model_entry['cmd'] = LiteralString(model_entry['cmd'])
+    
+    return save_data
+
 def save_config(config_path: str, config_data: Dict[str, Any], dry_run: bool) -> None:
     """Atomically saves the configuration, ensuring 'cmd' fields are correctly formatted."""
     if dry_run:
         logging.info("DRY RUN: Would save changes to '%s'.", config_path)
         return
 
-    # Before dumping, ensure all 'cmd' fields are wrapped in LiteralString
-    # for correct multi-line YAML output. This is a presentation-layer change
-    # that avoids interfering with the audit logic.
-    if 'models' in config_data and isinstance(config_data['models'], dict):
-        for model_entry in config_data['models'].values():
-            if isinstance(model_entry, dict) and 'cmd' in model_entry:
-                # Ensure cmd value is a string before wrapping
-                if not isinstance(model_entry['cmd'], str):
-                     model_entry['cmd'] = str(model_entry['cmd'])
-                model_entry['cmd'] = LiteralString(model_entry['cmd'])
+    # Prepare a copy with proper formatting
+    save_data = prepare_config_for_save(config_data)
     
     temp_path = f"{config_path}.tmp"
     try:
         with open(temp_path, 'w') as f:
-            yaml.dump(config_data, f, Dumper=yaml.SafeDumper, sort_keys=False, indent=2)
+            yaml.dump(save_data, f, Dumper=yaml.SafeDumper, sort_keys=False, indent=2)
         os.replace(temp_path, config_path)
         logging.info("Successfully updated '%s'.", config_path)
     except (OSError, PermissionError, yaml.YAMLError) as e:
         logging.critical("Failed to write to config file '%s'. Error: %s", config_path, e)
         if os.path.exists(temp_path):
-            os.remove(temp_path)
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
         sys.exit(1)
 
 def restart_docker_container(container_name: str, dry_run: bool) -> None:
@@ -224,7 +276,7 @@ def restart_docker_container(container_name: str, dry_run: bool) -> None:
         client.ping()
         container = client.containers.get(container_name)
         logging.info("Found container '%s' (ID: %s). Attempting to restart...", container_name, container.short_id)
-        container.restart()
+        container.restart(timeout=30)
         logging.info("Successfully sent restart command to container '%s'.", container_name)
     except docker.errors.NotFound:
         logging.warning("Docker container '%s' not found. Cannot restart.", container_name)
@@ -236,14 +288,18 @@ def restart_docker_container(container_name: str, dry_run: bool) -> None:
 def run_sync_process(config_path: str, models_dir: str, container_name: str, prune: bool, no_restart: bool, dry_run: bool) -> None:
     """Main function to backup, audit, sync, and conditionally restart."""
     lock_path = f"{config_path}.lock"
-    if os.path.exists(lock_path):
+    lock_fd = None
+    
+    # Try to acquire lock
+    try:
+        # Use O_CREAT | O_EXCL for atomic lock creation
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.write(lock_fd, str(os.getpid()).encode())
+    except OSError:
         logging.warning("Lock file '%s' exists. Another sync process may be running. Exiting.", lock_path)
         sys.exit(0)
     
     try:
-        with open(lock_path, 'w') as f:
-            f.write(str(os.getpid()))
-
         logging.info("--- Llama-Swap Config Sync Script ---")
         if prune:
             logging.info("Prune mode is active. Stale entries will be removed.")
@@ -252,7 +308,7 @@ def run_sync_process(config_path: str, models_dir: str, container_name: str, pru
 
         manage_backups(config_path, dry_run)
         config_data = load_config(config_path)
-        config_models = config_data.setdefault('models', {})
+        config_models = config_data['models']
         
         models_updated = audit_config_entries(config_models)
         model_keys_on_disk = find_models_on_disk(models_dir)
@@ -271,9 +327,17 @@ def run_sync_process(config_path: str, models_dir: str, container_name: str, pru
             logging.info("--- No changes needed. Configuration is already up to date. ---")
     
     finally:
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
         if os.path.exists(lock_path):
-            os.remove(lock_path)
-            logging.debug("Lock file '%s' removed.", lock_path)
+            try:
+                os.remove(lock_path)
+                logging.debug("Lock file '%s' removed.", lock_path)
+            except OSError as e:
+                logging.error("Failed to remove lock file '%s': %s", lock_path, e)
 
 def main() -> None:
     """Parses command-line arguments and environment variables to run the sync process."""
@@ -312,7 +376,7 @@ def main() -> None:
     elif args.quiet:
         log_level = logging.WARNING
 
-    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M%S')
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
     run_sync_process(
         config_path=args.config,

@@ -1,4 +1,3 @@
-
 # Llama-Swap-Sync
 
 ![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)
@@ -38,7 +37,7 @@ You can customize your model entries with confidence, knowing this tool will not
 
 1.  **Clone the repository or download the files:**
     ```bash
-    git clone [<repository_url>](https://github.com/pkeffect/llama-swap-sync)
+    git clone https://github.com/pkeffect/llama-swap-sync
     cd llama-swap-sync
     ```
 
@@ -79,7 +78,7 @@ The script is run from the command line. By default, it looks for `./models` and
 Specify custom paths for the config file and models directory, prune stale entries, and restart a specific container.
 
 ```bash
-python llama-swap-sync.py \
+python llama_swap_sync.py \
   --config /opt/llama-swap/config.yaml \
   --models-dir /mnt/models \
   --container my-llama-swap-container \
