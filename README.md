@@ -61,17 +61,17 @@ The script is run from the command line. By default, it looks for `./models` and
 
 -   **Perform a dry run to see what would change:**
     ```bash
-    python llama-swap-sync.py --dry-run
+    python llama_swap_sync.py --dry-run
     ```
 
 -   **Run the sync, adding new models and updating existing entries with any missing keys:**
     ```bash
-    python llama-swap-sync.py
+    python llama_swap_sync.py
     ```
 
 -   **Sync and remove stale entries from the config:**
     ```bash
-    python llama-swap-sync.py --prune
+    python llama_swap_sync.py --prune
     ```
 
 ### Advanced Example
