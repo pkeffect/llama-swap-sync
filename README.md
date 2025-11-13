@@ -26,7 +26,6 @@ You can customize your model entries with confidence, knowing this tool will not
     -   **Concurrency Lock:** A `.lock` file mechanism prevents multiple instances of the script from running simultaneously and causing race conditions.
 -   **Flexible Configuration:** Configure via command-line arguments, environment variables, or script defaults.
 -   **Structured Logging:** Provides clear, timestamped logs with verbosity controls (`--verbose`, `--quiet`).
--   **Unit Tested:** Core logic is validated with a `pytest` test suite to ensure reliability and prevent regressions.
 
 ## Prerequisites
 
@@ -99,15 +98,6 @@ The script can be configured in three ways, with the following order of preceden
 | Models Directory Path | `--models-dir`     | `LLAMA_SWAP_MODELS_DIR`   | `./models`         | Path to the directory containing `.gguf` files. |
 | Docker Container Name | `--container`      | `LLAMA_SWAP_CONTAINER`    | `llama-swap`       | Name of the container to restart on changes.    |
 
-## Running Tests
-
-The project includes a test suite to verify the core logic.
-
-1.  Ensure you have installed the dependencies from `requirements.txt`, which includes `pytest`.
-2.  Run the test suite from the project's root directory:
-    ```bash
-    pytest
-    ```
 
 ## License
 
