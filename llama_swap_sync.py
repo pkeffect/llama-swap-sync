@@ -1,4 +1,4 @@
-# VERSION: 0.2.0
+# VERSION: 0.3.0
 import argparse
 import datetime
 import glob
@@ -44,26 +44,36 @@ CMD_TEMPLATE = (
     "  --host 0.0.0.0"
 )
 
-def validate_filename(filename: str) -> bool:
+def validate_filepath(filepath: str) -> bool:
     """
-    Validate that filename is safe and follows expected pattern.
-    Prevents path traversal and ensures only valid GGUF filenames.
+    Validate that the relative filepath is safe.
+    Prevents path traversal and ensures it's a GGUF file.
     """
-    if not filename:
+    if not filepath:
         return False
-    # Check for path traversal attempts
-    if '..' in filename or '/' in filename or '\\' in filename:
+    # Check for path traversal attempts '..'
+    if '..' in filepath.replace('\\', '/').split('/'):
         return False
-    # Ensure filename matches expected pattern: alphanumeric, dash, underscore, dot, .gguf extension
-    return re.match(r'^[\w\-\.]+\.gguf$', filename) is not None
+    # Disallow absolute paths
+    if os.path.isabs(filepath):
+        return False
+    # Ensure it's a gguf file
+    return filepath.endswith('.gguf')
 
-def create_model_entry(filename: str) -> Dict[str, Any]:
-    """Creates a comprehensive, scaffolded dictionary for a model entry."""
-    model_key = filename.replace('.gguf', '')
-    pretty_name = model_key.replace('-', ' ').replace('_', ' ')
+def create_model_entry(filepath: str) -> Dict[str, Any]:
+    """Creates a comprehensive, scaffolded dictionary for a model entry from its relative path."""
+    # Normalize filepath to use forward slashes for consistency in keys and names
+    filepath_posix = filepath.replace(os.path.sep, '/')
+    
+    # Key must be a safe, unique string for YAML. Replace path separators with '--'.
+    model_key = filepath_posix.replace('.gguf', '').replace('/', '--')
+    
+    # Create a prettier name for display purposes
+    pretty_name = model_key.replace('--', ' / ').replace('-', ' ').replace('_', ' ')
+    
     entry: Dict[str, Any] = {
-        'name': pretty_name, 'description': f"Auto-generated entry for {filename}",
-        'cmd': LiteralString(CMD_TEMPLATE.format(model_filename=filename)),
+        'name': pretty_name, 'description': f"Auto-generated entry for {filepath_posix}",
+        'cmd': LiteralString(CMD_TEMPLATE.format(model_filename=filepath_posix)),
         'aliases': [], 'env': [], 'ttl': 0, 'unlisted': False, 'filters': {},
         'metadata': {}, 'macros': {}, 'concurrencyLimit': 0, 'cmdStop': ""
     }
@@ -144,15 +154,17 @@ def audit_config_entries(config_models: Dict[str, Any]) -> int:
     logging.info("--- Auditing Existing Config Entries for Completeness ---")
     models_updated = 0
     
-    # Create template keys set once for efficiency
-    template_keys = set(create_model_entry("dummy.gguf").keys())
+    # Create template keys set once for efficiency using a valid dummy path
+    template_keys = set(create_model_entry("dummy/dummy.gguf").keys())
     
     for model_key in list(config_models.keys()):
         existing_entry = config_models[model_key]
         
         if not isinstance(existing_entry, dict):
             logging.warning("Found malformed entry for '%s' (not a dictionary). Forcibly reformatting.", model_key)
-            config_models[model_key] = create_model_entry(f"{model_key}.gguf")
+            # Reconstruct the original filepath from the key to create a valid new entry
+            reconstructed_filepath = model_key.replace('--', '/') + '.gguf'
+            config_models[model_key] = create_model_entry(reconstructed_filepath)
             models_updated += 1
             continue
 
@@ -161,8 +173,9 @@ def audit_config_entries(config_models: Dict[str, Any]) -> int:
         # Check for missing keys
         missing_keys = template_keys - existing_entry.keys()
         if missing_keys:
-            # Generate full template to get default values for missing keys
-            ideal_template = create_model_entry(f"{model_key}.gguf")
+            # Reconstruct filepath from key to get accurate default values
+            reconstructed_filepath = model_key.replace('--', '/') + '.gguf'
+            ideal_template = create_model_entry(reconstructed_filepath)
             for key in missing_keys:
                 existing_entry[key] = ideal_template[key]
             entry_was_modified = True
@@ -173,39 +186,59 @@ def audit_config_entries(config_models: Dict[str, Any]) -> int:
         logging.info("All existing entries are structurally complete.")
     return models_updated
 
-def find_models_on_disk(models_dir: str) -> Set[str]:
-    """Scans the models directory for .gguf files and returns a set of model keys."""
-    logging.info("--- Syncing with Models Directory ---")
+def find_models_on_disk(models_dir: str) -> Dict[str, str]:
+    """Scans the models directory recursively for .gguf files. Returns a map of {model_key: relative_filepath}."""
+    logging.info("--- Syncing with Models Directory (Recursive Scan) ---")
+    model_paths: Dict[str, str] = {}
+    
     try:
-        all_files = [f for f in os.listdir(models_dir) if f.endswith('.gguf')]
-        valid_files = [f for f in all_files if validate_filename(f)]
+        if not os.path.isdir(models_dir):
+            raise FileNotFoundError
+
+        all_paths = []
+        for root, _, files in os.walk(models_dir):
+            for file in files:
+                if file.endswith('.gguf'):
+                    full_path = os.path.join(root, file)
+                    relative_path = os.path.relpath(full_path, models_dir)
+                    all_paths.append(relative_path)
         
-        invalid_count = len(all_files) - len(valid_files)
-        if invalid_count > 0:
-            invalid_files = set(all_files) - set(valid_files)
-            logging.warning("Ignored %d file(s) with invalid/unsafe filenames: %s", 
-                          invalid_count, ', '.join(sorted(invalid_files)))
+        invalid_paths = []
+        for path in all_paths:
+            # Normalize to POSIX-style paths for consistent key generation and validation
+            path_posix = path.replace(os.path.sep, '/')
+            if validate_filepath(path_posix):
+                model_key = path_posix.replace('.gguf', '').replace('/', '--')
+                model_paths[model_key] = path_posix
+            else:
+                invalid_paths.append(path)
         
-        return {f.replace('.gguf', '') for f in valid_files}
+        if invalid_paths:
+            logging.warning("Ignored %d file(s) with invalid/unsafe filepaths: %s", 
+                            len(invalid_paths), ', '.join(sorted(invalid_paths)))
+        
+        return model_paths
     except FileNotFoundError:
         logging.error("Models directory '%s' not found. Cannot add new models.", models_dir)
-        return set()
+        return {}
     except PermissionError:
         logging.error("Permission denied when trying to read models directory '%s'.", models_dir)
-        return set()
+        return {}
 
-def sync_disk_to_config(config_models: Dict[str, Any], disk_keys: Set[str], prune: bool) -> Tuple[int, int]:
+def sync_disk_to_config(config_models: Dict[str, Any], disk_models: Dict[str, str], prune: bool) -> Tuple[int, int]:
     """Adds new models and removes stale ones. Returns counts of added/removed models."""
     models_added, models_removed = 0, 0
     
-    for key in sorted(list(disk_keys)):
-        if key not in config_models:
-            filename = f"{key}.gguf"
-            logging.info("ADDING: New model file found: '%s'", filename)
-            config_models[key] = create_model_entry(filename)
-            models_added += 1
-
+    disk_keys = set(disk_models.keys())
     config_keys = set(config_models.keys())
+
+    new_keys = disk_keys - config_keys
+    for key in sorted(list(new_keys)):
+        filepath = disk_models[key]
+        logging.info("ADDING: New model file found: '%s'", filepath)
+        config_models[key] = create_model_entry(filepath)
+        models_added += 1
+
     stale_keys = config_keys - disk_keys
     if stale_keys:
         if prune:
@@ -311,8 +344,8 @@ def run_sync_process(config_path: str, models_dir: str, container_name: str, pru
         config_models = config_data['models']
         
         models_updated = audit_config_entries(config_models)
-        model_keys_on_disk = find_models_on_disk(models_dir)
-        models_added, models_removed = sync_disk_to_config(config_models, model_keys_on_disk, prune)
+        disk_model_map = find_models_on_disk(models_dir)
+        models_added, models_removed = sync_disk_to_config(config_models, disk_model_map, prune)
         
         changes_made = models_added > 0 or models_updated > 0 or models_removed > 0
         if changes_made:
