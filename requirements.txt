@@ -1,15 +1,11 @@
-# VERSION: 0.1.1
+# VERSION: 0.2.0
 # It is recommended to install these dependencies in a Python virtual environment
 # to avoid conflicts with system packages.
 # python -m venv venv
-# source venv/bin/activate
+# source venv/bin/activate  # On Windows: venv\Scripts\activate
 # pip install -r requirements.txt
 
-# swap_sync.py
-PyYAML==6.0.1
-docker==7.0.0
-
-# verify_models.py
-huggingface-hub==1.1.4
-tqdm==4.67.1
-blake3==1.0.8
+# Core dependencies
+PyYAML~=6.0.1
+huggingface-hub~=1.1.4
+tqdm~=4.67.1

@@ -1,4 +1,13 @@
-# VERSION: 0.2.0
+# VERSION: 0.3.0
+"""
+download_model.py - Hugging Face Model Downloader
+
+Downloads GGUF model files from Hugging Face repositories with automatic
+SHA256 verification and hash file generation.
+
+Author: pkeffect
+Version: 0.3.0
+"""
 import argparse
 import logging
 import os
@@ -10,8 +19,14 @@ from hf_utils import (
     parse_hf_url, verify_file_hash
 )
 
+# --- EXIT CODES ---
+EXIT_SUCCESS = 0
+EXIT_INVALID_URL = 1
+EXIT_DOWNLOAD_FAILED = 2
+EXIT_VERIFICATION_FAILED = 3
+
 # --- CONFIGURATION ---
-MODELS_DIR = './models'
+MODELS_DIR = os.getenv('LLAMA_SWAP_MODELS_DIR', './models')
 
 def main():
     """Main script logic."""
@@ -25,7 +40,7 @@ def main():
     )
     parser.add_argument(
         '--dest-dir', type=str, default=MODELS_DIR,
-        help="The root destination directory for models."
+        help="The root destination directory for models. Env: LLAMA_SWAP_MODELS_DIR"
     )
     parser.add_argument(
         '--retries', type=int, default=5,
@@ -53,7 +68,8 @@ def main():
     if not repo_id or not filename:
         logging.error("Invalid Hugging Face URL format.")
         logging.error("Expected format: https://huggingface.co/<user>/<repo>/blob/main/<filename>")
-        sys.exit(1)
+        logging.error("Example: https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.2-GGUF/blob/main/mistral-7b-instruct-v0.2.Q8_0.gguf")
+        sys.exit(EXIT_INVALID_URL)
 
     logging.info(f"Repository ID: {repo_id}")
     logging.info(f"Filename:      {filename}")
@@ -74,13 +90,13 @@ def main():
 
     if not downloaded_file:
         logging.error("\n--- Download Failed ---")
-        sys.exit(1)
+        sys.exit(EXIT_DOWNLOAD_FAILED)
 
     # Verify integrity if hash was retrieved
     if expected_hash and not args.skip_verification:
         if not verify_file_hash(downloaded_file, expected_hash):
             logging.error("File integrity check failed. The downloaded file may be corrupted.")
-            sys.exit(1)
+            sys.exit(EXIT_VERIFICATION_FAILED)
 
         # Create hash file after successful verification
         create_hash_file(downloaded_file, expected_hash)
@@ -88,6 +104,7 @@ def main():
         logging.warning("Skipping hash file creation (no hash available for verification).")
 
     logging.info("\n--- Download Complete ---")
+    sys.exit(EXIT_SUCCESS)
 
 if __name__ == '__main__':
     main()

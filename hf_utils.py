@@ -1,12 +1,40 @@
-# VERSION: 0.2.1
+# VERSION: 0.3.0
+"""
+hf_utils.py - Hugging Face Utility Functions
+
+This module provides utility functions for downloading, verifying, and managing
+GGUF model files from Hugging Face repositories.
+
+Key Features:
+- SHA256 hash calculation and verification with progress bars
+- Hugging Face URL parsing
+- Download with retry logic and resume support
+- Local file integrity checking
+- Recursive .gguf file discovery
+
+Usage:
+    from hf_utils import download_with_progress, verify_file_hash
+    
+    downloaded = download_with_progress('repo/model', 'file.gguf', './dest', 5, 10)
+    if verify_file_hash(downloaded, expected_hash):
+        print("Download successful and verified")
+
+Author: pkeffect
+Version: 0.3.0
+"""
 import hashlib
 import logging
 import os
 import re
+import sys
 import time
 from typing import Dict, Any
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.utils import HfHubHTTPError
+from tqdm import tqdm
+
+# Constants
+DEFAULT_CHUNK_SIZE = 8192
 
 def parse_hf_url(url: str) -> tuple[str | None, str | None]:
     """Parses a Hugging Face URL to extract the repository ID and filename."""
@@ -18,18 +46,37 @@ def parse_hf_url(url: str) -> tuple[str | None, str | None]:
         return repo_id, filename
     return None, None
 
-def calculate_sha256(filepath: str, chunk_size: int = 8192) -> str:
-    """Calculate SHA256 hash of a file."""
+def calculate_sha256(filepath: str, chunk_size: int = DEFAULT_CHUNK_SIZE, show_progress: bool = False) -> str:
+    """
+    Calculate SHA256 hash of a file with optional progress bar.
+    
+    Args:
+        filepath: Path to the file to hash
+        chunk_size: Size of chunks to read (default: 8192 bytes)
+        show_progress: Whether to display a progress bar
+    
+    Returns:
+        Hexadecimal SHA256 hash string
+    """
     sha256_hash = hashlib.sha256()
+    file_size = os.path.getsize(filepath)
+    
     with open(filepath, 'rb') as f:
-        for chunk in iter(lambda: f.read(chunk_size), b''):
-            sha256_hash.update(chunk)
+        if show_progress and file_size > 1024 * 1024:  # Only show for files > 1MB
+            with tqdm(total=file_size, unit='B', unit_scale=True, desc="Hashing") as pbar:
+                for chunk in iter(lambda: f.read(chunk_size), b''):
+                    sha256_hash.update(chunk)
+                    pbar.update(len(chunk))
+        else:
+            for chunk in iter(lambda: f.read(chunk_size), b''):
+                sha256_hash.update(chunk)
+    
     return sha256_hash.hexdigest()
 
 def verify_file_hash(filepath: str, expected_hash: str) -> bool:
     """Verify that a file's SHA256 hash matches the expected hash."""
     logging.info(f"Verifying file integrity for {os.path.basename(filepath)}...")
-    actual_hash = calculate_sha256(filepath)
+    actual_hash = calculate_sha256(filepath, show_progress=True)
 
     if actual_hash.lower() == expected_hash.lower():
         logging.info("✓ File integrity verified successfully.")
@@ -93,8 +140,10 @@ def read_hash_file(filepath: str) -> str | None:
             content = f.read().strip()
             # Format is: "hash  filename" or "hash *filename"
             parts = re.split(r'\s+', content, maxsplit=1)
-            if parts and len(parts[0]) == 64:  # SHA256 is 64 hex chars
-                return parts[0]
+            if parts and len(parts[0]) == 64:
+                # Validate it's actually hexadecimal
+                if re.match(r'^[a-fA-F0-9]{64}$', parts[0]):
+                    return parts[0]
             logging.warning(f"Malformed hash file: {os.path.basename(hash_filepath)}")
             return None
     except OSError as e:
@@ -110,7 +159,7 @@ def verify_local_file_integrity(filepath: str) -> bool:
     expected_hash = read_hash_file(filepath)
     
     if expected_hash is None:
-        logging.debug(f"No hash file found for {os.path.basename(filepath)}, skipping verification.")
+        logging.info(f"No hash file found for {os.path.basename(filepath)}, skipping verification.")
         return True
     
     return verify_file_hash(filepath, expected_hash)

@@ -1,7 +1,26 @@
-# VERSION: 0.5.0
+# VERSION: 0.6.0
+"""
+llama_swap_sync.py - GGUF Model Configuration Synchronizer
+
+Automatically synchronizes GGUF model files with llama-swap configuration,
+managing backups, auditing entries, and optionally restarting Docker containers.
+
+Features:
+- Recursive model discovery
+- Smart key generation with collision detection
+- Non-destructive configuration updates
+- Atomic file writes with backup management
+- Optional Docker container restart
+- Dry-run mode for safe preview
+
+Author: pkeffect
+Version: 0.6.0
+"""
 import argparse
+import copy
 import datetime
 import glob
+import hashlib
 import logging
 import os
 import shutil
@@ -13,12 +32,21 @@ import yaml
 
 from hf_utils import list_local_gguf_files, validate_gguf_filepath
 
-# --- CONFIGURATION (Defaults) ---
+# --- CONFIGURATION (Defaults - Override via CLI args or environment variables) ---
 MODELS_DIR = './models'
 CONFIG_FILE_PATH = './config.yaml'
 DOCKER_CONTAINER_NAME = 'llama-swap'
-MAX_BACKUPS = 3
-MAX_KEY_LENGTH = 80  # Maximum safe YAML key length before truncation
+
+# Configurable via environment variables
+MAX_BACKUPS = int(os.getenv('LLAMA_SWAP_MAX_BACKUPS', '3'))
+MAX_KEY_LENGTH = int(os.getenv('LLAMA_SWAP_MAX_KEY_LENGTH', '80'))
+
+# YAML width for optimal formatting (prevents very long single lines while maintaining readability)
+YAML_WIDTH = 120
+
+# --- CROSS-PLATFORM SYMBOLS ---
+CHECK_MARK = "✓" if sys.platform != "win32" else "[OK]"
+CROSS_MARK = "✗" if sys.platform != "win32" else "[X]"
 
 # --- PyYAML Customization for pretty multiline strings ---
 class LiteralString(str): pass
@@ -33,6 +61,7 @@ def create_safe_model_key(filepath: str) -> str:
     """
     Creates a safe, shortened YAML key from filepath.
     Long keys cause PyYAML to use '? key:' format which breaks llama-swap.
+    Uses SHA256 for hash suffix instead of MD5 for consistency.
     """
     # Normalize filepath to use forward slashes
     filepath_posix = filepath.replace(os.path.sep, '/')
@@ -57,10 +86,9 @@ def create_safe_model_key(filepath: str) -> str:
             
             shortened_key = f"{author}--{middle}--{variant}"
             
-            # If still too long, just hash it
+            # If still too long, hash it
             if len(shortened_key) > MAX_KEY_LENGTH:
-                import hashlib
-                hash_suffix = hashlib.md5(base_key.encode()).hexdigest()[:8]
+                hash_suffix = hashlib.sha256(base_key.encode()).hexdigest()[:8]
                 shortened_key = f"{author}--{variant}--{hash_suffix}"
             
             logging.debug(f"Shortened key: {base_key} -> {shortened_key}")
@@ -196,10 +224,19 @@ def sync_disk_to_config(config_models: Dict[str, Any], disk_models: Dict[str, st
     """Adds new models and removes stale ones. Returns counts of added/removed models."""
     models_added, models_removed = 0, 0
     
-    # Build mapping of safe keys for disk models
+    # Build mapping of safe keys for disk models with collision detection
     disk_safe_keys = {}
     for filepath in disk_models.values():
         safe_key = create_safe_model_key(filepath)
+        
+        # Check for collision
+        if safe_key in disk_safe_keys:
+            logging.error(f"Key collision detected: '{safe_key}' for both:")
+            logging.error(f"  - {disk_safe_keys[safe_key]}")
+            logging.error(f"  - {filepath}")
+            logging.error("This is a critical error. Cannot continue safely.")
+            sys.exit(1)
+        
         disk_safe_keys[safe_key] = filepath
     
     disk_keys = set(disk_safe_keys.keys())
@@ -227,8 +264,8 @@ def sync_disk_to_config(config_models: Dict[str, Any], disk_models: Dict[str, st
 
 def prepare_config_for_save(config_data: Dict[str, Any]) -> Dict[str, Any]:
     """Creates a deep copy of config with 'cmd' fields wrapped in LiteralString."""
-    import copy
     save_data = copy.deepcopy(config_data)
+    
     if 'models' in save_data and isinstance(save_data['models'], dict):
         for model_entry in save_data['models'].values():
             if isinstance(model_entry, dict) and 'cmd' in model_entry:
@@ -248,12 +285,13 @@ def save_config(config_path: str, config_data: Dict[str, Any], dry_run: bool) ->
     try:
         with open(temp_path, 'w', encoding='utf-8') as f:
             # Using explicit settings to prevent '? key:' format
+            # YAML_WIDTH set to 120 to balance line length with readability
             yaml.dump(
                 save_data, f,
                 Dumper=yaml.SafeDumper,
                 sort_keys=False,
                 indent=2,
-                width=120,  # Reasonable width instead of infinity
+                width=YAML_WIDTH,
                 default_flow_style=False,
                 allow_unicode=True
             )
@@ -289,7 +327,7 @@ def restart_docker_container(container_name: str, dry_run: bool) -> None:
         )
         
         if result.returncode == 0:
-            logging.info(f"✓ Successfully restarted container '{container_name}'.")
+            logging.info(f"{CHECK_MARK} Successfully restarted container '{container_name}'.")
             if result.stdout.strip():
                 logging.debug(f"Docker output: {result.stdout.strip()}")
         else:
@@ -301,6 +339,7 @@ def restart_docker_container(container_name: str, dry_run: bool) -> None:
         logging.error(f"Timeout while trying to restart container '{container_name}'.")
     except FileNotFoundError:
         logging.error("Docker CLI not found. Ensure 'docker' command is in your PATH.")
+        logging.error("Install Docker Desktop: https://docs.docker.com/get-docker/")
     except Exception as e:
         logging.error(f"Unexpected error restarting container: {e}")
 
@@ -313,8 +352,8 @@ def run_sync_process(config_path: str, models_dir: str, container_name: str, pru
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.write(lock_fd, str(os.getpid()).encode())
     except FileExistsError:
-        logging.warning("Lock file '%s' exists. Another sync process may be running. Exiting.", lock_path)
-        return
+        logging.error("Lock file '%s' exists. Another sync process is running. Exiting.", lock_path)
+        sys.exit(1)
 
     try:
         if dry_run:
